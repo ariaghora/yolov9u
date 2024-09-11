@@ -49,7 +49,7 @@ def parse_model(config: ModelConfig, input_channel_count: int):
         Conv.default_act = eval(act)  # TODO: make dict of class type instead of eval
         RepConvN.default_act = eval(act)
 
-    layers, skip_conn_indices, c2 = [], [], input_channel_count
+    layers, skip_conn_indices, out_ch = [], [], input_channel_count
 
     for i, (sources, module_type_str, args) in enumerate(
         config.backbone + config.head
@@ -67,22 +67,22 @@ def parse_model(config: ModelConfig, input_channel_count: int):
             RepNCSPELAN4,
             SPPELAN,
         }:
-            c1, c2 = input_channels[sources], args[0]
-            args = [c1, c2, *args[1:]]
+            inc_ch, out_ch = input_channels[sources], args[0]
+            args = [inc_ch, out_ch, *args[1:]]
         elif ModuleType is Concat:
-            c2 = sum(input_channels[x] for x in sources)
+            out_ch = sum(input_channels[x] for x in sources)
         elif ModuleType is CBLinear:
-            c2 = args[0]
-            c1 = input_channels[sources]
-            args = [c1, c2, *args[1:]]
+            out_ch = args[0]
+            inc_ch = input_channels[sources]
+            args = [inc_ch, out_ch, *args[1:]]
         elif ModuleType is CBFuse:
-            c2 = input_channels[sources[-1]]
+            out_ch = input_channels[sources[-1]]
         elif ModuleType is DDetect:
             args.append([input_channels[x] for x in sources])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(sources)
         else:
-            c2 = input_channels[sources]
+            out_ch = input_channels[sources]
 
         module = ModuleType(*args)  # module
 
@@ -101,7 +101,7 @@ def parse_model(config: ModelConfig, input_channel_count: int):
         layers.append(module)
 
         if i > 0:
-            input_channels.append(c2)
+            input_channels.append(out_ch)
     return nn.Sequential(*layers), sorted(skip_conn_indices)
 
 
