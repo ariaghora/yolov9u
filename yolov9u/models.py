@@ -78,20 +78,18 @@ def parse_model(config: ModelConfig, input_channel_count: int):
         else:
             out_ch = input_channels[sources]
 
-        module = ModuleType(*args)  # module
-
-        parameter_count = sum(x.numel() for x in module.parameters())  # number params
+        module = ModuleType(*args)  # instantiate module
 
         # attach index, 'from' index, type, number params
         # TODO: this is problematic, as this setting arbitrary attribute to an object.
         # also, `type` is reserved keyword
-        module.i, module.f, module.np = i, sources, parameter_count
+        module.i, module.f = i, sources
 
         skip_conn_indices.extend(
             x % i
             for x in ([sources] if isinstance(sources, int) else sources)
             if x != -1
-        )  # append to savelist: # TODO: WTF IS THIS
+        )
         layers.append(module)
 
         if i > 0:
