@@ -38,7 +38,11 @@ str_to_layer_type_dict = {
 }
 
 
-def parse_model(config: ModelConfig, input_channels):  # model_dict, input_channels(3)
+def parse_model(config: ModelConfig, input_channel_count: int):
+    # initial input channels. This will be extended with each module's input channel
+    # in the model
+    input_channels = [input_channel_count]
+
     # Parse a YOLO model based on some configuration
     anchors, class_count, gd, gw, act = (
         config.anchors,
@@ -59,7 +63,7 @@ def parse_model(config: ModelConfig, input_channels):  # model_dict, input_chann
 
     layers, skip_conn_indices, c2 = [], [], input_channels[-1]
 
-    for i, (sources, n, module_type_str, args) in enumerate(
+    for i, (sources, module_type_str, args) in enumerate(
         config.backbone + config.head
     ):  # from, number, module, args
         print(f"parsing {module_type_str}...")
@@ -120,6 +124,7 @@ def parse_model(config: ModelConfig, input_channels):  # model_dict, input_chann
         layers.append(module)
         if i == 0:
             input_channels = []
+
         input_channels.append(c2)
     return nn.Sequential(*layers), sorted(skip_conn_indices)
 
@@ -155,12 +160,12 @@ class BaseModel(nn.Module):
 class YOLODetectionModel(BaseModel):
     # YOLO detection model
     def __init__(
-        self, model_config: ModelConfig, ch=3, nc=None, anchors=None
+        self, model_config: ModelConfig, input_channel_count: int = 3
     ):  # model, input channels, number of classes
         super().__init__()
         self.model_config = model_config
         self.model, self.skip_conn_indices = parse_model(
-            self.model_config, input_channels=[ch]
+            self.model_config, input_channel_count=input_channel_count
         )  # model, savelist
         self.names = [
             str(i) for i in range(self.model_config.class_count)
@@ -173,7 +178,10 @@ class YOLODetectionModel(BaseModel):
         forward = lambda x: self.forward(x)
 
         m.stride = torch.tensor(
-            [s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))]
+            [
+                s / x.shape[-2]
+                for x in forward(torch.zeros(1, input_channel_count, s, s))
+            ]
         )
         self.stride = m.stride
 
