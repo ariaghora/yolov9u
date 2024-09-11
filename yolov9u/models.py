@@ -4,6 +4,9 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 
+from .blocks import (SPPELAN, ADown, CBFuse, CBLinear, Concat, Conv, DDetect,
+                     RepConvN, RepNCSPELAN4, Silence)
+
 
 @dataclass
 class ModelConfig:
@@ -17,11 +20,6 @@ class ModelConfig:
     activation: Optional[str] = None
     inplace: bool = True
 
-
-import contextlib  # TODO: WTF
-
-from .blocks import (SPPELAN, ADown, CBFuse, CBLinear, Concat, Conv, DDetect,
-                     RepConvN, RepNCSPELAN4, Silence, make_divisible)
 
 str_to_layer_type_dict = {
     "SPPELAN": SPPELAN,
@@ -56,10 +54,6 @@ def parse_model(config: ModelConfig, input_channel_count: int):
     ):  # from, number, module, args
         print(f"parsing {module_type_str}...")
         ModuleType = str_to_layer_type_dict[module_type_str]
-
-        for j, a in enumerate(args):
-            with contextlib.suppress(NameError):
-                args[j] = eval(a) if isinstance(a, str) else a  # eval strings
 
         if ModuleType in {
             Conv,
