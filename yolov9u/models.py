@@ -80,9 +80,6 @@ def parse_model(config: ModelConfig, input_channel_count: int):
             SPPELAN,
         }:
             c1, c2 = input_channels[sources], args[0]
-            if c2 != output_count:  # if not output
-                c2 = make_divisible(c2 * gw, 8)
-
             args = [c1, c2, *args[1:]]
         elif ModuleType is Concat:
             c2 = sum(input_channels[x] for x in sources)
