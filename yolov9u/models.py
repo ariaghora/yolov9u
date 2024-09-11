@@ -126,20 +126,18 @@ class BaseModel(nn.Module):
     #     return self
 
 
-class YOLODetectionModel(BaseModel):
+class YOLODetector(BaseModel):
     # YOLO detection model
     def __init__(
         self, model_config: ModelConfig, input_channel_count: int = 3
     ):  # model, input channels, number of classes
         super().__init__()
         self.model_config = model_config
+        self.inplace = self.model_config.inplace
+
         self.model, self.skip_conn_indices = parse_model(
             self.model_config, input_channel_count=input_channel_count
-        )  # model, savelist
-        self.names = [
-            str(i) for i in range(self.model_config.class_count)
-        ]  # default names
-        self.inplace = self.model_config.inplace
+        )
 
         # Build strides, anchors
         m: torch.nn.Module = self.model[-1]  # last module (Detect/DDetect/etc.)

@@ -5,7 +5,7 @@ import torch
 import yaml
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
-from yolov9u.models import ModelConfig, YOLODetectionModel
+from yolov9u.models import ModelConfig, YOLODetector
 from yolov9u.postprocessing import process_predictions
 
 
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     with open("./config/yolov9-gelan-e.yaml") as f:
         config = ModelConfig(**yaml.load(f, yaml.SafeLoader))
 
-    model = YOLODetectionModel(config).float()
+    model = YOLODetector(config).float()
     model.load_state_dict(torch.load("./yolov9-e.pt", weights_only=True))
     model.eval()
 
