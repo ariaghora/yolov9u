@@ -41,7 +41,7 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
         sy = (
             torch.arange(end=h, device=device, dtype=dtype) + grid_cell_offset
         )  # shift y
-        sy, sx = torch.meshgrid(sy, sx)
+        sy, sx = torch.meshgrid(sy, sx, indexing=None)
         anchor_points.append(torch.stack((sx, sy), -1).view(-1, 2))
         stride_tensor.append(torch.full((h * w, 1), stride, dtype=dtype, device=device))
     return torch.cat(anchor_points), torch.cat(stride_tensor)

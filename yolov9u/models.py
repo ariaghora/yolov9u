@@ -41,17 +41,16 @@ def parse_model(config: ModelConfig, ch):  # model_dict, input_channels(3)
     )  # number of anchors
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
-    layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+    layers, skip_conn_indices, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(
         config.backbone + config.head
     ):  # from, number, module, args
         print(f"parsing {m}...")
         m = eval(m) if isinstance(m, str) else m  # eval strings
         for j, a in enumerate(args):
-            #     with contextlib.suppress(NameError):
-            args[j] = eval(a) if isinstance(a, str) else a  # eval strings
+            with contextlib.suppress(NameError):
+                args[j] = eval(a) if isinstance(a, str) else a  # eval strings
 
-        n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
             Conv,
             ADown,
@@ -86,25 +85,24 @@ def parse_model(config: ModelConfig, ch):  # model_dict, input_channels(3)
         else:
             c2 = ch[f]
 
-        m_ = (
-            nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
-        )  # module
-        t = str(m)[8:-2].replace("__main__.", "")  # module type
+        m_ = m(*args)  # module
+
+        # t = str(m)[8:-2].replace("__main__.", "")  # module type
         np = sum(x.numel() for x in m_.parameters())  # number params
 
         # attach index, 'from' index, type, number params
         # TODO: this is problematic, as this setting arbitrary attribute to an object.
         # also, `type` is reserved keyword
-        m_.i, m_.f, m_.type, m_.np = (i, f, t, np)
+        m_.i, m_.f, m_.np = (i, f, np)
 
-        save.extend(
+        skip_conn_indices.extend(
             x % i for x in ([f] if isinstance(f, int) else f) if x != -1
         )  # append to savelist: # TODO: WTF IS THIS
         layers.append(m_)
         if i == 0:
             ch = []
         ch.append(c2)
-    return nn.Sequential(*layers), sorted(save)
+    return nn.Sequential(*layers), sorted(skip_conn_indices)
 
 
 class BaseModel(nn.Module):
