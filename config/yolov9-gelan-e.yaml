@@ -1,7 +1,7 @@
 # YOLOv9
 
 # parameters
-nc: 80  # number of classes
+class_count: 80  # number of classes
 depth_multiple: 1.0  # model depth multiple
 width_multiple: 1.0  # layer channel multiple
 
@@ -87,14 +87,14 @@ head:
    [28, 1, SPPELAN, [512, 256]],  # 29
 
    # up-concat merge
-   [-1, 1, nn.Upsample, [None, 2, 'nearest']],
+   [-1, 1, Upsample, [None, 2, 'nearest']],
    [[-1, 25], 1, Concat, [1]],  # cat backbone P4
 
    # elan-2 block
    [-1, 1, RepNCSPELAN4, [512, 512, 256, 2]],  # 32
 
    # up-concat merge
-   [-1, 1, nn.Upsample, [None, 2, 'nearest']],
+   [-1, 1, Upsample, [None, 2, 'nearest']],
    [[-1, 22], 1, Concat, [1]],  # cat backbone P3
 
    # elan-2 block
@@ -115,5 +115,5 @@ head:
    [-1, 1, RepNCSPELAN4, [512, 1024, 512, 2]],  # 41 (P5/32-large)
 
    # detect
-   [[35, 38, 41], 1, DDetect, [nc]],  # Detect(P3, P4, P5)
+   [[35, 38, 41], 1, DDetect, [class_count]],  # Detect(P3, P4, P5)
   ]

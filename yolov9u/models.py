@@ -9,7 +9,7 @@ import torch.nn as nn
 class ModelConfig:
     backbone: List[Any]
     head: List[Any]
-    nc: int
+    class_count: int
     depth_multiple: float = 1.0
     width_multiple: float = 1.0
     ch: int = 3
@@ -23,12 +23,26 @@ import contextlib  # TODO: WTF
 from .blocks import (SPPELAN, ADown, CBFuse, CBLinear, Concat, Conv, DDetect,
                      RepConvN, RepNCSPELAN4, Silence, make_divisible)
 
+str_to_layer_type_dict = {
+    "SPPELAN": SPPELAN,
+    "ADown": ADown,
+    "CBFuse": CBFuse,
+    "CBLinear": CBLinear,
+    "Concat": Concat,
+    "Conv": Conv,
+    "DDetect": DDetect,
+    "RepConvN": RepConvN,
+    "RepNCSPELAN4": RepNCSPELAN4,
+    "Silence": Silence,
+    "Upsample": nn.Upsample,
+}
 
-def parse_model(config: ModelConfig, ch):  # model_dict, input_channels(3)
+
+def parse_model(config: ModelConfig, input_channels):  # model_dict, input_channels(3)
     # Parse a YOLO model based on some configuration
-    anchors, nc, gd, gw, act = (
+    anchors, class_count, gd, gw, act = (
         config.anchors,
-        config.nc,
+        config.class_count,
         config.depth_multiple,
         config.width_multiple,
         config.activation,
@@ -36,72 +50,77 @@ def parse_model(config: ModelConfig, ch):  # model_dict, input_channels(3)
     if act:
         Conv.default_act = eval(act)  # TODO: make dict of class type instead of eval
         RepConvN.default_act = eval(act)
-    na = (
-        (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors
-    )  # number of anchors
-    no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
-    layers, skip_conn_indices, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(
+    # calculate the number of anchors
+    anchor_count = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors
+    output_count = anchor_count * (
+        class_count + 5
+    )  # number of outputs = anchors * (classes + 5)
+
+    layers, skip_conn_indices, c2 = [], [], input_channels[-1]
+
+    for i, (sources, n, module_type_str, args) in enumerate(
         config.backbone + config.head
     ):  # from, number, module, args
-        print(f"parsing {m}...")
-        m = eval(m) if isinstance(m, str) else m  # eval strings
+        print(f"parsing {module_type_str}...")
+        ModuleType = str_to_layer_type_dict[module_type_str]
+
         for j, a in enumerate(args):
             with contextlib.suppress(NameError):
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings
 
-        if m in {
+        if ModuleType in {
             Conv,
             ADown,
             RepNCSPELAN4,
             SPPELAN,
         }:
-            c1, c2 = ch[f], args[0]
-            if c2 != no:  # if not output
+            c1, c2 = input_channels[sources], args[0]
+            if c2 != output_count:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
 
             args = [c1, c2, *args[1:]]
-        elif m is Concat:
-            c2 = sum(ch[x] for x in f)
-        elif m is CBLinear:
+        elif ModuleType is Concat:
+            c2 = sum(input_channels[x] for x in sources)
+        elif ModuleType is CBLinear:
             c2 = args[0]
-            c1 = ch[f]
+            c1 = input_channels[sources]
             args = [c1, c2, *args[1:]]
-        elif m is CBFuse:
-            c2 = ch[f[-1]]
+        elif ModuleType is CBFuse:
+            c2 = input_channels[sources[-1]]
         # TODO: channel, gw, gd
-        elif m in {
+        elif ModuleType in {
             DDetect,
             # Segment,
             # DSegment,
             # DualDSegment,
             # Panoptic,
         }:
-            args.append([ch[x] for x in f])
+            args.append([input_channels[x] for x in sources])
             if isinstance(args[1], int):  # number of anchors
-                args[1] = [list(range(args[1] * 2))] * len(f)
+                args[1] = [list(range(args[1] * 2))] * len(sources)
             # TODO: handle the rest other than DDetect
         else:
-            c2 = ch[f]
+            c2 = input_channels[sources]
 
-        m_ = m(*args)  # module
+        module = ModuleType(*args)  # module
 
-        # t = str(m)[8:-2].replace("__main__.", "")  # module type
-        np = sum(x.numel() for x in m_.parameters())  # number params
+        parameter_count = sum(x.numel() for x in module.parameters())  # number params
 
         # attach index, 'from' index, type, number params
         # TODO: this is problematic, as this setting arbitrary attribute to an object.
         # also, `type` is reserved keyword
-        m_.i, m_.f, m_.np = (i, f, np)
+        module.i, module.f, module.np = (i, sources, parameter_count)
 
         skip_conn_indices.extend(
-            x % i for x in ([f] if isinstance(f, int) else f) if x != -1
+            x % i
+            for x in ([sources] if isinstance(sources, int) else sources)
+            if x != -1
         )  # append to savelist: # TODO: WTF IS THIS
-        layers.append(m_)
+        layers.append(module)
         if i == 0:
-            ch = []
-        ch.append(c2)
+            input_channels = []
+        input_channels.append(c2)
     return nn.Sequential(*layers), sorted(skip_conn_indices)
 
 
@@ -133,7 +152,7 @@ class BaseModel(nn.Module):
         return self
 
 
-class DetectionModel(BaseModel):
+class YOLODetectionModel(BaseModel):
     # YOLO detection model
     def __init__(
         self, model_config: ModelConfig, ch=3, nc=None, anchors=None
@@ -141,9 +160,11 @@ class DetectionModel(BaseModel):
         super().__init__()
         self.model_config = model_config
         self.model, self.skip_conn_indices = parse_model(
-            self.model_config, ch=[ch]
+            self.model_config, input_channels=[ch]
         )  # model, savelist
-        self.names = [str(i) for i in range(self.model_config.nc)]  # default names
+        self.names = [
+            str(i) for i in range(self.model_config.class_count)
+        ]  # default names
         self.inplace = self.model_config.inplace
 
         # Build strides, anchors
