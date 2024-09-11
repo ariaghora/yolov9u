@@ -1,4 +1,5 @@
 import math
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -101,7 +102,7 @@ class CBLinear(nn.Module):
         self.c2s = c2s
         self.conv = nn.Conv2d(c1, sum(c2s), k, s, autopad(k, p), groups=g, bias=True)
 
-    def forward(self, x):
+    def forward(self, x: List[torch.Tensor]):
         outs = self.conv(x).split(self.c2s, dim=1)
         return outs
 

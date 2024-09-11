@@ -40,28 +40,16 @@ str_to_layer_type_dict = {
 
 def parse_model(config: ModelConfig, input_channel_count: int):
     # initial input channels. This will be extended with each module's input channel
-    # in the model
+    # in the model.
     input_channels = [input_channel_count]
 
     # Parse a YOLO model based on some configuration
-    anchors, class_count, gd, gw, act = (
-        config.anchors,
-        config.class_count,
-        config.depth_multiple,
-        config.width_multiple,
-        config.activation,
-    )
+    act = config.activation
     if act:
         Conv.default_act = eval(act)  # TODO: make dict of class type instead of eval
         RepConvN.default_act = eval(act)
 
-    # calculate the number of anchors
-    anchor_count = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors
-    output_count = anchor_count * (
-        class_count + 5
-    )  # number of outputs = anchors * (classes + 5)
-
-    layers, skip_conn_indices, c2 = [], [], input_channels[-1]
+    layers, skip_conn_indices, c2 = [], [], input_channel_count
 
     for i, (sources, module_type_str, args) in enumerate(
         config.backbone + config.head
@@ -89,18 +77,10 @@ def parse_model(config: ModelConfig, input_channel_count: int):
             args = [c1, c2, *args[1:]]
         elif ModuleType is CBFuse:
             c2 = input_channels[sources[-1]]
-        # TODO: channel, gw, gd
-        elif ModuleType in {
-            DDetect,
-            # Segment,
-            # DSegment,
-            # DualDSegment,
-            # Panoptic,
-        }:
+        elif ModuleType is DDetect:
             args.append([input_channels[x] for x in sources])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(sources)
-            # TODO: handle the rest other than DDetect
         else:
             c2 = input_channels[sources]
 
@@ -111,7 +91,7 @@ def parse_model(config: ModelConfig, input_channel_count: int):
         # attach index, 'from' index, type, number params
         # TODO: this is problematic, as this setting arbitrary attribute to an object.
         # also, `type` is reserved keyword
-        module.i, module.f, module.np = (i, sources, parameter_count)
+        module.i, module.f, module.np = i, sources, parameter_count
 
         skip_conn_indices.extend(
             x % i
@@ -119,10 +99,9 @@ def parse_model(config: ModelConfig, input_channel_count: int):
             if x != -1
         )  # append to savelist: # TODO: WTF IS THIS
         layers.append(module)
-        if i == 0:
-            input_channels = []
 
-        input_channels.append(c2)
+        if i > 0:
+            input_channels.append(c2)
     return nn.Sequential(*layers), sorted(skip_conn_indices)
 
 
@@ -134,7 +113,7 @@ class BaseModel(nn.Module):
     def _forward_once(self, x):
         y = []
         for m in self.model:
-            if m.f != -1:  # if not from previous layer
+            if m.f != -1:  # if it has no previous layers...
                 x = (
                     y[m.f]
                     if isinstance(m.f, int)
@@ -144,14 +123,15 @@ class BaseModel(nn.Module):
             y.append(x if m.i in self.skip_conn_indices else None)  # save output
         return x
 
-    def _apply(self, fn, recurse: bool = True):
-        # Apply to(), cpu(), cuda(), half() to model tensors that are not parameters or registered buffers
-        self = super()._apply(fn)
-        m = self.model[-1]  # Detect()
-        m.stride = fn(m.stride)
-        m.anchors = fn(m.anchors)
-        m.strides = fn(m.strides)
-        return self
+    # TODO: remove? seems not used. Need to check on CUDA with x.to("cuda").
+    # def _apply(self, fn, recurse: bool = True):
+    #     # Apply to(), cpu(), cuda(), half() to model tensors that are not parameters or registered buffers
+    #     self = super()._apply(fn)
+    #     m = self.model[-1]  # Detect()
+    #     m.stride = fn(m.stride)
+    #     m.anchors = fn(m.anchors)
+    #     m.strides = fn(m.strides)
+    #     return self
 
 
 class YOLODetectionModel(BaseModel):
