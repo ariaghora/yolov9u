@@ -15,7 +15,7 @@ class ModelConfig:
     class_count: int
     depth_multiple: float = 1.0
     width_multiple: float = 1.0
-    ch: int = 3
+    input_channels: int = 3
     anchors: int = 3
     activation: Optional[str] = None
     inplace: bool = True
