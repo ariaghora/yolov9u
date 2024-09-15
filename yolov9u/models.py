@@ -1,25 +1,19 @@
-from dataclasses import dataclass
-from typing import Any, List, Optional
-
 import torch
 import torch.nn as nn
 
-from .blocks import (SPPELAN, ADown, CBFuse, CBLinear, Concat, Conv, DDetect,
-                     RepConvN, RepNCSPELAN4, Silence)
-
-
-@dataclass
-class ModelConfig:
-    backbone: List[Any]
-    head: List[Any]
-    class_count: int
-    depth_multiple: float = 1.0
-    width_multiple: float = 1.0
-    input_channels: int = 3
-    anchors: int = 3
-    activation: Optional[str] = None
-    inplace: bool = True
-
+from .blocks import (
+    SPPELAN,
+    ADown,
+    CBFuse,
+    CBLinear,
+    Concat,
+    Conv,
+    DDetect,
+    RepConvN,
+    RepNCSPELAN4,
+    Silence,
+)
+from .config import ModelConfig
 
 str_to_layer_type_dict = {
     "SPPELAN": SPPELAN,
@@ -52,7 +46,6 @@ def parse_model(config: ModelConfig, input_channel_count: int):
     for i, (sources, module_type_str, args) in enumerate(
         config.backbone + config.head
     ):  # from, number, module, args
-        print(f"parsing {module_type_str}...")
         ModuleType = str_to_layer_type_dict[module_type_str]
 
         if ModuleType in {
@@ -115,16 +108,6 @@ class BaseModel(nn.Module):
             y.append(x if m.i in self.skip_conn_indices else None)  # save output
         return x
 
-    # TODO: remove? seems not used. Need to check on CUDA with x.to("cuda").
-    # def _apply(self, fn, recurse: bool = True):
-    #     # Apply to(), cpu(), cuda(), half() to model tensors that are not parameters or registered buffers
-    #     self = super()._apply(fn)
-    #     m = self.model[-1]  # Detect()
-    #     m.stride = fn(m.stride)
-    #     m.anchors = fn(m.anchors)
-    #     m.strides = fn(m.strides)
-    #     return self
-
 
 class YOLODetector(BaseModel):
     # YOLO detection model
@@ -144,12 +127,9 @@ class YOLODetector(BaseModel):
         s = 256  # 2x min stride
         forward = lambda x: self.forward(x)
 
-        m.stride = torch.tensor(
-            [
-                s / x.shape[-2]
-                for x in forward(torch.zeros(1, input_channel_count, s, s))
-            ]
-        )
+        m.stride = torch.tensor([
+            s / x.shape[-2] for x in forward(torch.zeros(1, input_channel_count, s, s))
+        ])
         self.stride = m.stride
 
     def forward(self, x: torch.Tensor, augment=False, profile=False, visualize=False):

@@ -1,0 +1,11 @@
+with_pretrained_weight: true
+pretrained_weight_path: yolov9-e.pt
+minibatch_size: 32
+
+training_image_dir: data/images/train/
+training_label_dir: data/labels/train/
+validation_image_dir: data/images/validation/
+validation_label_dir: data/labels/validation/
+
+label_extension: "txt"
+label_value_separator: " "

@@ -5,6 +5,7 @@ import torch
 import yaml
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
+
 from yolov9u.models import ModelConfig, YOLODetector
 from yolov9u.postprocessing import process_predictions
 
@@ -41,7 +42,7 @@ def draw_boxes(
 
 
 if __name__ == "__main__":
-    with open("./config/yolov9-gelan-e.yaml") as f:
+    with open("./config/architectures/yolov9-gelan-e.yaml") as f:
         config = ModelConfig(**yaml.load(f, yaml.SafeLoader))
 
     model = YOLODetector(config).float()
