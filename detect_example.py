@@ -42,7 +42,7 @@ def draw_boxes(
 
 
 if __name__ == "__main__":
-    with open("./config/architectures/yolov9-gelan-e.yaml") as f:
+    with open("./config/model/yolov9-gelan-e.yaml") as f:
         config = ModelConfig(**yaml.load(f, yaml.SafeLoader))
 
     model = YOLODetector(config).float()
