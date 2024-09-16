@@ -1,14 +1,14 @@
 import os
-from glob import glob
 from argparse import ArgumentParser
+from glob import glob
 from typing import Callable, List, Literal, Optional, Set
 
+import numpy as np
 import torch
-from torch.utils.data.dataset import Dataset
 import yaml
 from loguru import logger
 from PIL import Image
-import numpy as np
+from torch.utils.data.dataset import Dataset
 
 from yolov9u.config import ModelConfig, TrainingConfig
 from yolov9u.models import YOLODetector
@@ -154,10 +154,6 @@ if __name__ == "__main__":
         label_dir=training_config.training_label_dir,
         points_format="points",
     )
-    x, y = dataset_training[100]
-
-    print(y)
-    print(dataset_training.image_dirs[100])
 
     model = YOLODetector(model_config).float()
     if training_config.with_pretrained_weight:
