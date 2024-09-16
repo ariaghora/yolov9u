@@ -28,3 +28,5 @@ class TrainingConfig:
 
     label_extension: str
     label_value_separator: str
+
+    device: str

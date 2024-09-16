@@ -1,17 +1,115 @@
 import os
+import random
 from argparse import ArgumentParser
 from glob import glob
-from typing import Callable, List, Literal, Optional, Set
+from typing import Any, List, Literal, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
+import torchvision.transforms as transforms
 import yaml
 from loguru import logger
 from PIL import Image
+from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
+from torchvision.transforms import functional as F
+from tqdm import tqdm
 
 from yolov9u.config import ModelConfig, TrainingConfig
 from yolov9u.models import YOLODetector
+from yolov9u.loss import ComputeLoss
+import torch.nn as nn
+
+
+def yolo_collate_fn(
+    batch: List[Tuple[torch.Tensor, torch.Tensor]],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Custom collate function for YOLO DataLoader.
+
+    Regular collcate_fn cannot handle YOLO target, since an image
+    may have different number of bounding boxes. As for the lost of image
+    itself, we can simply stack like what the default collate_fn do.
+
+    I followed the original code to put image index within a batch. Extra
+    first column was created in the DetectionDataset class' __getitem__.
+    Not doing this will cause shape mismatch error.
+    """
+    images, targets = zip(*batch)
+    for i, target in enumerate(targets):
+        target[:, 0] = i
+
+    # Stack images into a single tensor
+    images = torch.stack(images, 0)
+    targets = torch.cat(targets, 0)
+
+    return images, targets
+
+
+class YOLOTransform:
+    def __init__(self, size: int):
+        self.size = size
+
+    def letterbox(
+        self, image: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h, w = image.shape[1:]
+        scale = min(self.size / h, self.size / w)
+        nh, nw = int(h * scale), int(w * scale)
+
+        # Resize image
+        image = F.resize(image, [nh, nw])
+
+        # Create new image with gray padding
+        new_image = torch.full((3, self.size, self.size), 0.5)
+        dx, dy = (self.size - nw) // 2, (self.size - nh) // 2
+        new_image[:, dy : dy + nh, dx : dx + nw] = image
+
+        # Adjust bounding boxes
+        if target.numel() > 0:
+            # Convert YOLO format to pixel coordinates
+            target[:, [1, 3]] *= w
+            target[:, [2, 4]] *= h
+
+            # Apply scale and offset
+            target[:, 1] = target[:, 1] * scale + dx
+            target[:, 2] = target[:, 2] * scale + dy
+            target[:, 3] *= scale
+            target[:, 4] *= scale
+
+            # Convert back to normalized coordinates
+            target[:, [1, 3]] /= self.size
+            target[:, [2, 4]] /= self.size
+
+            target_out = torch.zeros(len(target), 6)
+            target_out[:, 1:] = target
+            target = target_out
+
+        return new_image, target
+
+    def __call__(
+        self, image: torch.Tensor, target: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Letterbox
+        image, target = self.letterbox(image, target)
+
+        # Random horizontal flip
+        if random.random() > 0.5:
+            image = F.hflip(image)
+            if target.numel() > 0:
+                target[:, 1] = 1 - target[:, 1]  # flip x_center
+
+        # Color jitter
+        image = transforms.ColorJitter(
+            brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1
+        )(image)
+
+        # Normalize
+        image = F.normalize(
+            image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
+
+        return image, target
 
 
 class DetectionDataset(Dataset):
@@ -20,7 +118,7 @@ class DetectionDataset(Dataset):
         image_dir: str,
         label_dir: Optional[str],
         points_format: Literal["xywh", "xyxy", "points"],
-        transform_fn: Optional[Callable[[Image.Image], torch.Tensor]] = None,
+        transform_fn: Optional[Any] = None,
     ) -> None:
         """
         For now, we assume that the labels are in jpg, and the txt is
@@ -80,19 +178,25 @@ class DetectionDataset(Dataset):
         else:
             self.label_dirs = None
 
-    def __getitem__(self, idx: int):
+    def __getitem__(
+        self, idx: int
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if self.label_dir:
-            return self._get_image(idx), self._get_label(idx)
+            image, label = self._get_image(idx), self._get_label(idx)
+            if self.transform_fn:
+                image_tensor, label = self.transform_fn(image, label)
+            else:
+                image_tensor = torch.FloatTensor(np.array(image)).permute(2, 0, 1)
+            return image_tensor, label
         return self._get_image(idx)
+
+    def __len__(self):
+        return len(self.image_dirs)
 
     @logger.catch
     def _get_image(self, idx: int) -> torch.Tensor:
         image = Image.open(self.image_dirs[idx])
-        if self.transform_fn:
-            image_tensor = self.transform_fn(image)
-        else:
-            image_tensor = torch.FloatTensor(np.array(image)).permute(2, 0, 1)
-        return image_tensor
+        return F.to_tensor(image)
 
     @logger.catch
     def _get_label(self, idx: int) -> torch.Tensor:
@@ -153,9 +257,18 @@ if __name__ == "__main__":
         image_dir=training_config.training_image_dir,
         label_dir=training_config.training_label_dir,
         points_format="points",
+        transform_fn=YOLOTransform(640),
     )
 
-    model = YOLODetector(model_config).float()
+    dataloader_training = DataLoader(
+        dataset_training,
+        shuffle=True,
+        batch_size=training_config.minibatch_size,
+        drop_last=True,
+        collate_fn=yolo_collate_fn,
+    )
+
+    model = YOLODetector(model_config)
     if training_config.with_pretrained_weight:
         logger.info(
             f"prertrained model is used: {training_config.pretrained_weight_path}"
@@ -163,3 +276,17 @@ if __name__ == "__main__":
         model.load_state_dict(
             torch.load(training_config.pretrained_weight_path, weights_only=True)
         )
+    model = model.to(training_config.device).half().train()
+
+    model = nn.DataParallel(model)
+
+    loss_func = ComputeLoss(
+        model_config.class_count, model.module.model[-1].stride, training_config.device
+    )
+
+    for x, y in tqdm(dataloader_training):
+        x = x.to(training_config.device).half()
+        y = y.to(training_config.device).half()
+        with torch.autocast(training_config.device):
+            pred = model(x)
+            loss, item = loss_func(pred, y)

@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,10 +9,28 @@ from .postprocessing import xywh2xyxy
 def smooth_bce(eps=0.1):
     return 1.0 - 0.5 * eps, 0.5 * eps
 
+
 def bbox2dist(anchor_points, bbox, reg_max):
     """Transform bbox(xyxy) to dist(ltrb)."""
     x1y1, x2y2 = torch.split(bbox, 2, -1)
-    return torch.cat((anchor_points - x1y1, x2y2 - anchor_points), -1).clamp(0, reg_max - 0.01)  # dist (lt, rb)
+    return torch.cat((anchor_points - x1y1, x2y2 - anchor_points), -1).clamp(
+        0, reg_max - 0.01
+    )  # dist (lt, rb)
+
+def make_anchors(feats, strides, grid_cell_offset=0.5):
+    """Generate anchors from features."""
+    anchor_points, stride_tensor = [], []
+    assert feats is not None
+    dtype, device = feats[0].dtype, feats[0].device
+    for i, stride in enumerate(strides):
+        _, _, h, w = feats[i].shape
+        sx = torch.arange(end=w, device=device, dtype=dtype) + grid_cell_offset  # shift x
+        sy = torch.arange(end=h, device=device, dtype=dtype) + grid_cell_offset  # shift y
+        sy, sx = torch.meshgrid(sy, sx)
+        anchor_points.append(torch.stack((sx, sy), -1).view(-1, 2))
+        stride_tensor.append(torch.full((h * w, 1), stride, dtype=dtype, device=device))
+    return torch.cat(anchor_points), torch.cat(stride_tensor)
+
 
 class FocalLoss(nn.Module):
     # Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)
@@ -76,8 +93,8 @@ class BboxLoss(nn.Module):
             dist_mask = fg_mask.unsqueeze(-1).repeat([1, 1, (self.reg_max + 1) * 4])
             pred_dist_pos = torch.masked_select(pred_dist, dist_mask).view(
                 -1, 4, self.reg_max + 1
-                target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
             )
+            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
             target_ltrb_pos = torch.masked_select(target_ltrb, bbox_mask).view(-1, 4)
             loss_dfl = self._df_loss(pred_dist_pos, target_ltrb_pos) * bbox_weight
             loss_dfl = loss_dfl.sum() / target_scores_sum
@@ -110,48 +127,223 @@ class BboxLoss(nn.Module):
         return (loss_left + loss_right).mean(-1, keepdim=True)
 
 
+class TaskAlignedAssigner(nn.Module):
+    def __init__(self, topk=13, num_classes=80, alpha=1.0, beta=6.0, eps=1e-9):
+        super().__init__()
+        self.topk = topk
+        self.num_classes = num_classes
+        self.bg_idx = num_classes
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
+
+    @torch.no_grad()
+    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+        """This code referenced to
+           https://github.com/Nioolek/PPYOLOE_pytorch/blob/master/ppyoloe/assigner/tal_assigner.py
+
+        Args:
+            pd_scores (Tensor): shape(bs, num_total_anchors, num_classes)
+            pd_bboxes (Tensor): shape(bs, num_total_anchors, 4)
+            anc_points (Tensor): shape(num_total_anchors, 2)
+            gt_labels (Tensor): shape(bs, n_max_boxes, 1)
+            gt_bboxes (Tensor): shape(bs, n_max_boxes, 4)
+            mask_gt (Tensor): shape(bs, n_max_boxes, 1)
+        Returns:
+            target_labels (Tensor): shape(bs, num_total_anchors)
+            target_bboxes (Tensor): shape(bs, num_total_anchors, 4)
+            target_scores (Tensor): shape(bs, num_total_anchors, num_classes)
+            fg_mask (Tensor): shape(bs, num_total_anchors)
+        """
+        self.bs = pd_scores.size(0)
+        self.n_max_boxes = gt_bboxes.size(1)
+
+        if self.n_max_boxes == 0:
+            device = gt_bboxes.device
+            return (
+                torch.full_like(pd_scores[..., 0], self.bg_idx).to(device),
+                torch.zeros_like(pd_bboxes).to(device),
+                torch.zeros_like(pd_scores).to(device),
+                torch.zeros_like(pd_scores[..., 0]).to(device),
+            )
+
+        mask_pos, align_metric, overlaps = self.get_pos_mask(
+            pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
+        )
+
+        target_gt_idx, fg_mask, mask_pos = select_highest_overlaps(
+            mask_pos, overlaps, self.n_max_boxes
+        )
+
+        # assigned target
+        target_labels, target_bboxes, target_scores = self.get_targets(
+            gt_labels, gt_bboxes, target_gt_idx, fg_mask
+        )
+
+        # normalize
+        align_metric *= mask_pos
+        pos_align_metrics = align_metric.amax(axis=-1, keepdim=True)  # b, max_num_obj
+        pos_overlaps = (overlaps * mask_pos).amax(
+            axis=-1, keepdim=True
+        )  # b, max_num_obj
+        norm_align_metric = (
+            (align_metric * pos_overlaps / (pos_align_metrics + self.eps))
+            .amax(-2)
+            .unsqueeze(-1)
+        )
+        target_scores = target_scores * norm_align_metric
+
+        return target_labels, target_bboxes, target_scores, fg_mask.bool()
+
+    def get_pos_mask(
+        self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
+    ):
+        # get anchor_align metric, (b, max_num_obj, h*w)
+        align_metric, overlaps = self.get_box_metrics(
+            pd_scores, pd_bboxes, gt_labels, gt_bboxes
+        )
+        # get in_gts mask, (b, max_num_obj, h*w)
+        mask_in_gts = select_candidates_in_gts(anc_points, gt_bboxes)
+        # get topk_metric mask, (b, max_num_obj, h*w)
+        mask_topk = self.select_topk_candidates(
+            align_metric * mask_in_gts,
+            topk_mask=mask_gt.repeat([1, 1, self.topk]).bool(),
+        )
+        # merge all mask to a final mask, (b, max_num_obj, h*w)
+        mask_pos = mask_topk * mask_in_gts * mask_gt
+
+        return mask_pos, align_metric, overlaps
+
+    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes):
+        gt_labels = gt_labels.to(torch.long)  # b, max_num_obj, 1
+        ind = torch.zeros(
+            [2, self.bs, self.n_max_boxes], dtype=torch.long
+        )  # 2, b, max_num_obj
+        ind[0] = (
+            torch.arange(end=self.bs).view(-1, 1).repeat(1, self.n_max_boxes)
+        )  # b, max_num_obj
+        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
+        # get the scores of each grid for each gt cls
+        bbox_scores = pd_scores[ind[0], :, ind[1]]  # b, max_num_obj, h*w
+
+        overlaps = (
+            bbox_iou(
+                gt_bboxes.unsqueeze(2), pd_bboxes.unsqueeze(1), xywh=False, CIoU=True
+            )
+            .squeeze(3)
+            .clamp(0)
+        )
+        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
+        return align_metric, overlaps
+
+    def select_topk_candidates(self, metrics, largest=True, topk_mask=None):
+        """
+        Args:
+            metrics: (b, max_num_obj, h*w).
+            topk_mask: (b, max_num_obj, topk) or None
+        """
+
+        num_anchors = metrics.shape[-1]  # h*w
+        # (b, max_num_obj, topk)
+        topk_metrics, topk_idxs = torch.topk(
+            metrics, self.topk, dim=-1, largest=largest
+        )
+        if topk_mask is None:
+            topk_mask = (topk_metrics.max(-1, keepdim=True) > self.eps).tile([
+                1,
+                1,
+                self.topk,
+            ])
+        # (b, max_num_obj, topk)
+        topk_idxs = torch.where(topk_mask, topk_idxs, 0)
+        # (b, max_num_obj, topk, h*w) -> (b, max_num_obj, h*w)
+        is_in_topk = F.one_hot(topk_idxs, num_anchors).sum(-2)
+        # filter invalid bboxes
+        # assigned topk should be unique, this is for dealing with empty labels
+        # since empty labels will generate index `0` through `F.one_hot`
+        # NOTE: but what if the topk_idxs include `0`?
+        is_in_topk = torch.where(is_in_topk > 1, 0, is_in_topk)
+        return is_in_topk.to(metrics.dtype)
+
+    def get_targets(self, gt_labels, gt_bboxes, target_gt_idx, fg_mask):
+        """
+        Args:
+            gt_labels: (b, max_num_obj, 1)
+            gt_bboxes: (b, max_num_obj, 4)
+            target_gt_idx: (b, h*w)
+            fg_mask: (b, h*w)
+        """
+
+        # assigned target labels, (b, 1)
+        batch_ind = torch.arange(
+            end=self.bs, dtype=torch.int64, device=gt_labels.device
+        )[..., None]
+        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+        target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
+
+        # assigned target boxes, (b, max_num_obj, 4) -> (b, h*w)
+        target_bboxes = gt_bboxes.view(-1, 4)[target_gt_idx]
+
+        # assigned target scores
+        target_labels.clamp(0)
+        target_scores = F.one_hot(target_labels, self.num_classes)  # (b, h*w, 80)
+        fg_scores_mask = fg_mask[:, :, None].repeat(
+            1, 1, self.num_classes
+        )  # (b, h*w, 80)
+        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
+
+        return target_labels, target_bboxes, target_scores
+
+
 class ComputeLoss:
     # Compute losses
-    def __init__(self, model, use_dfl=True):
-        device = next(model.parameters()).device  # get model device
-        h = model.hyp  # hyperparameters
+    def __init__(
+        self,
+        # model,
+        class_count: int,
+        stride: torch.Tensor,
+        device: str,
+        use_dfl=True,
+    ):
+        positive_weight = 1.0
+        focal_loss_gamma = 0.0
+        reg_max = 16
+        # h = model.hyp  # hyperparameters
 
         # Define criteria
         loss_func_bce = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor([h["cls_pw"]], device=device), reduction="none"
+            pos_weight=torch.tensor([positive_weight], device=device), reduction="none"
         )
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
-        self.cp, self.cn = smooth_bce(
-            eps=h.get("label_smoothing", 0.0)
-        )  # positive, negative BCE targets
+        self.cp, self.cn = smooth_bce(eps=0.0)  # positive, negative BCE targets
 
         # Focal loss
-        g = h["fl_gamma"]  # focal loss gamma
+        g = focal_loss_gamma
         if g > 0:
             loss_func_bce = FocalLoss(loss_func_bce, g)
 
-        m = de_parallel(model).model[-1]  # Detect() module
-        self.balance = {3: [4.0, 1.0, 0.4]}.get(
-            m.nl, [4.0, 1.0, 0.25, 0.06, 0.02]
-        )  # P3-P7
-        self.BCEcls = loss_func_bce
-        self.hyp = h
-        self.stride = m.stride  # model strides
-        self.nc = m.nc  # number of classes
-        self.nl = m.nl  # number of layers
-        self.no = m.no
-        self.reg_max = m.reg_max
+        # m = model.model[-1]  # Detect() module
+        # self.balance = {3: [4.0, 1.0, 0.4]}.get(
+        #     1, [4.0, 1.0, 0.25, 0.06, 0.02]
+        # )  # P3-P7
+        self.loss_func_bce = loss_func_bce
+        # self.hyp = h
+        self.stride = stride  # model strides
+        self.class_count = class_count  # number of classes
+        # self.nl = m.nl  # number of layers
+        self.no = reg_max * 4 + class_count
+        self.reg_max = reg_max
         self.device = device
 
         self.assigner = TaskAlignedAssigner(
             topk=10,
-            num_classes=self.nc,
+            num_classes=self.class_count,
             alpha=0.5,
             beta=6.0,
         )
-        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=use_dfl).to(device)
-        self.proj = torch.arange(m.reg_max).float().to(device)  # / 120.0
+        self.bbox_loss = BboxLoss(reg_max - 1, use_dfl=use_dfl).to(device)
+        self.proj = torch.arange(reg_max).float().to(device)  # / 120.0
         self.use_dfl = use_dfl
 
     def preprocess(self, targets, batch_size, scale_tensor):
@@ -184,7 +376,7 @@ class ComputeLoss:
         feats = p[1] if isinstance(p, tuple) else p
         pred_distri, pred_scores = torch.cat(
             [xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2
-        ).split((self.reg_max * 4, self.nc), 1)
+        ).split((self.reg_max * 4, self.class_count), 1)
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
 
@@ -219,7 +411,8 @@ class ComputeLoss:
         # cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         loss[1] = (
-            self.BCEcls(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+            self.loss_func_bce(pred_scores, target_scores.to(dtype)).sum()
+            / target_scores_sum
         )  # BCE
 
         # bbox loss
