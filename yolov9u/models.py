@@ -1,18 +1,8 @@
 import torch
 import torch.nn as nn
 
-from .blocks import (
-    SPPELAN,
-    ADown,
-    CBFuse,
-    CBLinear,
-    Concat,
-    Conv,
-    DDetect,
-    RepConvN,
-    RepNCSPELAN4,
-    Silence,
-)
+from .blocks import (SPPELAN, ADown, CBFuse, CBLinear, Concat, Conv, DDetect,
+                     RepConvN, RepNCSPELAN4, Silence)
 from .config import ModelConfig
 
 str_to_layer_type_dict = {
