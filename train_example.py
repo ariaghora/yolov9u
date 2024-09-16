@@ -6,10 +6,12 @@ from typing import Any, List, Literal, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torchvision.transforms as transforms
 import yaml
 from loguru import logger
 from PIL import Image
+from torch.optim.sgd import SGD
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
 from torchvision.transforms import functional as F
@@ -17,8 +19,7 @@ from tqdm import tqdm
 
 from yolov9u.config import ModelConfig, TrainingConfig
 from yolov9u.models import YOLODetector
-from yolov9u.loss import ComputeLoss
-import torch.nn as nn
+from yolov9u.loss import YOLOLoss
 
 
 def yolo_collate_fn(
@@ -105,9 +106,7 @@ class YOLOTransform:
         )(image)
 
         # Normalize
-        image = F.normalize(
-            image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
+        image = image / 255.0
 
         return image, target
 
@@ -276,17 +275,44 @@ if __name__ == "__main__":
         model.load_state_dict(
             torch.load(training_config.pretrained_weight_path, weights_only=True)
         )
-    model = model.to(training_config.device).half().train()
+    model = model.to(training_config.device).train()
+    if training_config.device == "cuda":
+        model = model.half()  # I'm GPU-poor
 
     model = nn.DataParallel(model)
 
-    loss_func = ComputeLoss(
+    loss_func = YOLOLoss(
         model_config.class_count, model.module.model[-1].stride, training_config.device
     )
+    loss_scaler = None
+    if training_config.device == "cuda":
+        loss_scaler = torch.amp.GradScaler("cuda")
 
-    for x, y in tqdm(dataloader_training):
-        x = x.to(training_config.device).half()
-        y = y.to(training_config.device).half()
-        with torch.autocast(training_config.device):
-            pred = model(x)
-            loss, item = loss_func(pred, y)
+    optim = SGD(params=model.parameters(), lr=0.001)
+
+    pbar = tqdm(dataloader_training)
+    for x, y in pbar:
+        optim.zero_grad()
+        x = x.to(training_config.device)
+        y = y.to(training_config.device)
+        if training_config.device == "cuda":
+            x = x.half()  # I'm GPU-poor
+            y = y.half()  # I'm GPU-poor
+        pred = model(x)
+        loss, loss_components = loss_func(pred, y)
+        if loss_scaler:
+            loss_scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        # for name, p in model.named_parameters():
+        #     if p.grad is not None:
+        #         val = p.grad.sum().detach().cpu().item()
+        #     else:
+        #         print(f"{name} has no grad")
+        #         continue
+        #     print(name, val)
+
+        optim.step()
+        box_loss, cls_loss, dfl_loss = loss_components
+        pbar.set_description(f"loss: {loss.item()}  ")
